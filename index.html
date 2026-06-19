@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>SCAD Viewer — upload & preview OpenSCAD in 3D</title>
+<style>
+  :root{
+    --bg:#0c0f14; --panel:#11161f; --panel-2:#0e1219; --line:#1d2733;
+    --ink:#e6edf3; --muted:#8b97a7; --accent:#4cc4ff; --accent-2:#ffd24c;
+    --danger:#ff6b6b; --ok:#5ee08a; --mono:"SF Mono",ui-monospace,"JetBrains Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0}
+  body{
+    background:var(--bg); color:var(--ink); font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+    display:grid; grid-template-columns:340px 1fr; height:100vh; overflow:hidden;
+  }
+  /* ---- sidebar ---- */
+  aside{
+    background:linear-gradient(180deg,var(--panel),var(--panel-2));
+    border-right:1px solid var(--line); display:flex; flex-direction:column; min-height:0;
+  }
+  .brand{padding:18px 18px 14px; border-bottom:1px solid var(--line)}
+  .brand h1{margin:0; font-size:16px; letter-spacing:.3px; display:flex; align-items:center; gap:8px}
+  .brand h1 .dot{width:9px;height:9px;border-radius:50%;background:var(--accent);box-shadow:0 0 12px var(--accent)}
+  .brand p{margin:6px 0 0; color:var(--muted); font-size:12px; font-family:var(--mono)}
+  .scroll{overflow:auto; padding:14px 18px; display:flex; flex-direction:column; gap:14px; min-height:0}
+  .scroll::-webkit-scrollbar{width:9px}
+  .scroll::-webkit-scrollbar-thumb{background:#1c2735;border-radius:9px}
+
+  .drop{
+    border:1.5px dashed #2a3a4d; border-radius:12px; padding:20px 14px; text-align:center;
+    cursor:pointer; transition:.15s; background:#0d1219;
+  }
+  .drop:hover,.drop.hot{border-color:var(--accent); background:#0e1722; box-shadow:0 0 0 3px rgba(76,196,255,.08) inset}
+  .drop strong{display:block; font-size:13px}
+  .drop span{color:var(--muted); font-size:12px}
+  .drop .ico{font-size:26px; line-height:1; margin-bottom:6px; opacity:.9}
+
+  .row{display:flex; gap:8px; flex-wrap:wrap}
+  button{
+    font:inherit; color:var(--ink); background:#16202c; border:1px solid var(--line);
+    padding:8px 12px; border-radius:9px; cursor:pointer; transition:.12s; font-size:13px;
+  }
+  button:hover{border-color:#33485f; background:#1a2735}
+  button.primary{background:var(--accent); color:#04121c; border-color:transparent; font-weight:600}
+  button.primary:hover{filter:brightness(1.08)}
+  button:disabled{opacity:.45; cursor:not-allowed}
+  button.toggle.on{background:rgba(76,196,255,.16); border-color:var(--accent); color:var(--accent)}
+
+  .label{font-size:11px; text-transform:uppercase; letter-spacing:.8px; color:var(--muted); margin:2px 0}
+  .status{font-family:var(--mono); font-size:12px; display:flex; align-items:center; gap:8px; color:var(--muted)}
+  .status .pulse{width:8px;height:8px;border-radius:50%;background:var(--muted);flex:none}
+  .status.ready .pulse{background:var(--ok); box-shadow:0 0 8px var(--ok)}
+  .status.busy .pulse{background:var(--accent-2); box-shadow:0 0 8px var(--accent-2); animation:blink 1s infinite}
+  .status.err .pulse{background:var(--danger); box-shadow:0 0 8px var(--danger)}
+  @keyframes blink{50%{opacity:.25}}
+
+  textarea{
+    width:100%; min-height:150px; resize:vertical; background:#0a0e14; color:#cfe3f2;
+    border:1px solid var(--line); border-radius:9px; padding:10px; font:12px/1.5 var(--mono); tab-size:2;
+  }
+  textarea:focus{outline:none; border-color:var(--accent)}
+
+  details{border:1px solid var(--line); border-radius:9px; background:#0b0f15; overflow:hidden}
+  summary{padding:8px 12px; cursor:pointer; font-size:12px; color:var(--muted); user-select:none}
+  summary::marker{color:var(--accent)}
+  .log{max-height:160px; overflow:auto; padding:8px 12px; font:11px/1.5 var(--mono); border-top:1px solid var(--line); white-space:pre-wrap; word-break:break-word; color:#9fb3c6}
+  .log .e{color:var(--danger)}
+  .log .w{color:var(--accent-2)}
+  .log .i{color:#7fd1a0}
+  .foot{margin-top:auto; padding:12px 18px; border-top:1px solid var(--line); color:var(--muted); font-size:11px; font-family:var(--mono)}
+
+  /* ---- viewport ---- */
+  main{position:relative; min-width:0}
+  #view{position:absolute; inset:0; display:block}
+  .hud{position:absolute; left:14px; bottom:12px; font:11px/1.4 var(--mono); color:var(--muted); pointer-events:none; text-shadow:0 1px 2px #000}
+  .overlay{
+    position:absolute; inset:0; display:none; place-items:center; background:rgba(8,11,16,.72); backdrop-filter:blur(2px); z-index:5;
+  }
+  .overlay.show{display:grid}
+  .spinner{width:44px;height:44px;border-radius:50%;border:3px solid #1d2733;border-top-color:var(--accent);animation:spin .8s linear infinite;margin:0 auto 12px}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .overlay .t{text-align:center;color:var(--ink);font-family:var(--mono);font-size:13px}
+  .overlay .sub{color:var(--muted);font-size:11px;margin-top:4px}
+  .empty{position:absolute; inset:0; display:grid; place-items:center; color:#3f566e; font-family:var(--mono); font-size:13px; text-align:center; pointer-events:none}
+  .empty .big{font-size:40px;margin-bottom:8px;opacity:.5}
+
+  @media (max-width:760px){
+    body{grid-template-columns:1fr; grid-template-rows:auto 1fr}
+    aside{max-height:46vh}
+  }
+</style>
+</head>
+<body>
+<aside>
+  <div class="brand">
+    <h1><span class="dot"></span> SCAD Viewer</h1>
+    <p>upload .scad → render in 3D</p>
+  </div>
+
+  <div class="scroll">
+    <div id="drop" class="drop">
+      <div class="ico">⬡</div>
+      <strong>Drop a .scad file</strong>
+      <span>or click to browse</span>
+    </div>
+    <input id="file" type="file" accept=".scad,text/plain" hidden />
+
+    <div class="row">
+      <button id="sample">Load sample</button>
+      <button id="render" class="primary" style="flex:1">Render ▸</button>
+    </div>
+
+    <div class="status" id="status"><span class="pulse"></span><span id="statusText">Booting engine…</span></div>
+
+    <div>
+      <div class="label">Source <span id="fname" style="color:#5d7a99;text-transform:none;letter-spacing:0"></span></div>
+      <textarea id="code" spellcheck="false" placeholder="// OpenSCAD code appears here after upload — edit & press Render"></textarea>
+    </div>
+
+    <div class="row">
+      <button id="wire" class="toggle">Wireframe</button>
+      <button id="spin" class="toggle">Auto-rotate</button>
+      <button id="grid" class="toggle on">Grid</button>
+      <button id="fit">Reset view</button>
+    </div>
+
+    <details open>
+      <summary>Console</summary>
+      <div class="log" id="log"></div>
+    </details>
+  </div>
+
+  <div class="foot">OpenSCAD-WASM · three.js · runs fully in your browser</div>
+</aside>
+
+<main>
+  <canvas id="view"></canvas>
+  <div class="hud" id="hud">drag: orbit · scroll: zoom · right-drag: pan</div>
+  <div class="empty" id="empty"><div><div class="big">⬡</div>no model yet<br/>upload a .scad file to begin</div></div>
+  <div class="overlay" id="overlay">
+    <div class="t"><div class="spinner"></div><div id="ovText">Compiling…</div><div class="sub" id="ovSub">first run loads the engine (~14 MB)</div></div>
+  </div>
+</main>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { STLLoader } from 'three/addons/loaders/STLLoader.js';
+
+/* ---------------- OpenSCAD engine (lazy, fresh instance per compile) ---------------- */
+let createOpenSCAD = null;
+async function loadEngine(){
+  if (createOpenSCAD) return;
+  setStatus('busy','Loading OpenSCAD engine…');
+  const mod = await import('https://cdn.jsdelivr.net/npm/openscad-wasm@0.0.4/openscad.js');
+  createOpenSCAD = mod.createOpenSCAD;
+}
+
+async function compileScad(code){
+  await loadEngine();
+  // A fresh instance per render keeps OpenSCAD's globals clean across files.
+  const osc = await createOpenSCAD({
+    print:    t => logLine(t, 'i'),
+    printErr: t => logLine(t, /error|fail/i.test(t) ? 'e' : 'w'),
+  });
+  const fs = osc.getInstance().FS;
+  try { fs.unlink('/in.scad'); } catch {}
+  try { fs.unlink('/out.stl'); } catch {}
+  fs.writeFile('/in.scad', code);
+  osc.getInstance().callMain(['/in.scad', '-o', '/out.stl']);
+  let data;
+  try { data = fs.readFile('/out.stl'); }      // Uint8Array (ascii or binary STL)
+  catch { throw new Error('OpenSCAD produced no output — see console for errors.'); }
+  if (!data || data.length === 0) throw new Error('Empty model — check your .scad for errors.');
+  return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+}
+
+/* ---------------- three.js scene ---------------- */
+const canvas = document.getElementById('view');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias:true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color('#0c0f14');
+
+const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100000);
+camera.position.set(60, 45, 70);
+
+const controls = new OrbitControls(camera, canvas);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+
+scene.add(new THREE.HemisphereLight('#bcd4ff', '#1a1f28', 0.9));
+const key = new THREE.DirectionalLight('#ffffff', 1.6);
+key.position.set(40, 80, 50); key.castShadow = true;
+key.shadow.mapSize.set(2048, 2048); key.shadow.bias = -0.0004;
+const ds = 200; Object.assign(key.shadow.camera, { left:-ds, right:ds, top:ds, bottom:-ds, near:1, far:600 });
+scene.add(key);
+const fill = new THREE.DirectionalLight('#7fb6ff', 0.5); fill.position.set(-60, 20, -40); scene.add(fill);
+
+let grid = makeGrid();
+scene.add(grid);
+let ground = makeGround();
+scene.add(ground);
+
+let mesh = null;
+const material = new THREE.MeshStandardMaterial({ color:'#7fdcff', metalness:0.15, roughness:0.55, flatShading:false });
+
+function makeGrid(){
+  const g = new THREE.GridHelper(400, 40, 0x2a4258, 0x182230);
+  g.material.transparent = true; g.material.opacity = 0.55; return g;
+}
+function makeGround(){
+  const m = new THREE.Mesh(
+    new THREE.PlaneGeometry(4000, 4000),
+    new THREE.ShadowMaterial({ opacity:0.28 })
+  );
+  m.rotation.x = -Math.PI/2; m.position.y = -0.01; m.receiveShadow = true; return m;
+}
+
+function setModel(geometry){
+  if (mesh){ scene.remove(mesh); mesh.geometry.dispose(); }
+  geometry.computeVertexNormals();
+  geometry.computeBoundingBox();
+  // OpenSCAD is Z-up; three.js is Y-up → rotate so models stand correctly.
+  geometry.rotateX(-Math.PI/2);
+  geometry.computeBoundingBox();
+  const bb = geometry.boundingBox;
+  const center = bb.getCenter(new THREE.Vector3());
+  geometry.translate(-center.x, -bb.min.y, -center.z); // sit on the grid, centered
+  mesh = new THREE.Mesh(geometry, material);
+  mesh.castShadow = true; mesh.receiveShadow = true;
+  scene.add(mesh);
+  document.getElementById('empty').style.display = 'none';
+  frameObject();
+}
+
+function frameObject(){
+  if (!mesh) return;
+  mesh.geometry.computeBoundingSphere();
+  const s = mesh.geometry.boundingSphere;
+  const r = Math.max(s.radius, 1);
+  const dist = r / Math.sin((camera.fov/2) * Math.PI/180) * 1.25;
+  const dir = new THREE.Vector3(1, 0.8, 1).normalize();
+  controls.target.set(0, r*0.55, 0);
+  camera.position.copy(controls.target).add(dir.multiplyScalar(dist));
+  camera.near = dist/100; camera.far = dist*100; camera.updateProjectionMatrix();
+  // scale helpers to the model
+  const gscale = Math.max(1, Math.round(r/50));
+  grid.scale.setScalar(gscale);
+}
+
+function resize(){
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  if (canvas.width !== w*renderer.getPixelRatio() || canvas.height !== h*renderer.getPixelRatio()){
+    renderer.setSize(w, h, false);
+    camera.aspect = w/h; camera.updateProjectionMatrix();
+  }
+}
+function loop(){
+  resize();
+  controls.autoRotate = spinOn;
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+
+/* ---------------- UI wiring ---------------- */
+const $ = id => document.getElementById(id);
+const codeEl = $('code'), logEl = $('log');
+let spinOn = false;
+
+function setStatus(kind, text){
+  const s = $('status'); s.className = 'status ' + kind;
+  $('statusText').textContent = text;
+}
+function logLine(text, cls=''){
+  const d = document.createElement('div');
+  if (cls) d.className = cls;
+  d.textContent = text;
+  logEl.appendChild(d); logEl.scrollTop = logEl.scrollHeight;
+}
+function clearLog(){ logEl.textContent=''; }
+function overlay(show, text, sub){
+  $('overlay').classList.toggle('show', show);
+  if (text) $('ovText').textContent = text;
+  $('ovSub').textContent = sub || '';
+}
+
+async function render(){
+  const code = codeEl.value.trim();
+  if (!code){ logLine('Nothing to render — upload or load a sample first.', 'w'); return; }
+  $('render').disabled = true;
+  clearLog();
+  overlay(true, 'Compiling…', createOpenSCAD ? '' : 'first run loads the engine (~14 MB)');
+  setStatus('busy', 'Compiling .scad…');
+  const t0 = performance.now();
+  try {
+    const stl = await compileScad(code);
+    const geo = new STLLoader().parse(stl);
+    setModel(geo);
+    const ms = Math.round(performance.now() - t0);
+    const tris = geo.attributes.position.count / 3 | 0;
+    setStatus('ready', `Rendered · ${tris.toLocaleString()} tris · ${ms} ms`);
+    logLine(`✓ done — ${tris.toLocaleString()} triangles in ${ms} ms`, 'i');
+  } catch (err){
+    console.error(err);
+    setStatus('err', 'Render failed');
+    logLine('✗ ' + (err.message || err), 'e');
+  } finally {
+    overlay(false);
+    $('render').disabled = false;
+  }
+}
+
+function loadFile(file){
+  if (!file) return;
+  const r = new FileReader();
+  r.onload = () => {
+    codeEl.value = r.result;
+    $('fname').textContent = '· ' + file.name;
+    render();
+  };
+  r.readAsText(file);
+}
+
+/* drag & drop + browse */
+const drop = $('drop');
+drop.addEventListener('click', () => $('file').click());
+$('file').addEventListener('change', e => loadFile(e.target.files[0]));
+['dragenter','dragover'].forEach(ev => addEventListener(ev, e => {
+  if ([...e.dataTransfer.types].includes('Files')){ e.preventDefault(); drop.classList.add('hot'); }
+}));
+['dragleave','drop'].forEach(ev => addEventListener(ev, e => {
+  e.preventDefault(); if (ev==='drop' || e.target===document.documentElement) drop.classList.remove('hot');
+}));
+addEventListener('drop', e => {
+  e.preventDefault(); drop.classList.remove('hot');
+  const f = [...e.dataTransfer.files].find(f => /\.scad$/i.test(f.name)) || e.dataTransfer.files[0];
+  loadFile(f);
+});
+
+/* buttons */
+$('render').addEventListener('click', render);
+$('fit').addEventListener('click', frameObject);
+$('wire').addEventListener('click', e => {
+  material.wireframe = !material.wireframe; e.currentTarget.classList.toggle('on', material.wireframe);
+});
+$('spin').addEventListener('click', e => {
+  spinOn = !spinOn; e.currentTarget.classList.toggle('on', spinOn);
+});
+$('grid').addEventListener('click', e => {
+  grid.visible = !grid.visible; e.currentTarget.classList.toggle('on', grid.visible);
+});
+$('sample').addEventListener('click', () => {
+  codeEl.value = SAMPLE; $('fname').textContent = '· sample.scad'; render();
+});
+
+const SAMPLE = `// sample.scad — a little gear-ish badge
+$fn = 64;
+difference() {
+  union() {
+    cylinder(h = 6, r = 26);
+    for (i = [0:11])
+      rotate([0, 0, i * 30])
+        translate([26, 0, 0])
+          cylinder(h = 6, r = 5);
+  }
+  translate([0, 0, -1]) cylinder(h = 8, r = 9);
+  for (i = [0:5])
+    rotate([0, 0, i * 60])
+      translate([14, 0, -1]) cylinder(h = 8, r = 3.5);
+}
+translate([0, 0, 6]) cylinder(h = 3, r1 = 9, r2 = 6);`;
+
+/* warm up the engine in the background so the first real render is fast */
+loadEngine()
+  .then(() => setStatus('ready', 'Engine ready — drop a .scad file'))
+  .catch(e => { setStatus('err', 'Engine failed to load'); logLine('Engine load error: ' + e.message, 'e'); });
+</script>
+</body>
+</html>
