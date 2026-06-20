@@ -111,7 +111,7 @@
       <strong>Tap to choose a .scad file</strong>
       <span>or drag &amp; drop it here</span>
     </label>
-    <input id="file" class="vh" type="file" />
+    <input id="file" class="vh" type="file" accept=".scad,text/plain,application/octet-stream" />
 
     <div class="row">
       <button id="sample">Load sample</button>
@@ -192,19 +192,23 @@ async function loadEngine(){
 // One render attempt on a fresh instance. callMain is one-shot per instance
 // (a 2nd call crashes it), and instantiation is only ~150ms, so we make a new one each time.
 async function renderWith(code, backendArgs){
-  const osc = await createOpenSCAD({
+  let osc = await createOpenSCAD({
     print:    t => logLine(t, 'i'),
     printErr: t => logLine(t, /\b(error|fail)/i.test(t) ? 'e' : 'w'),
   });
-  const fs = osc.getInstance().FS;
-  fs.writeFile('/in.scad', code);
-  let threw = false;
-  try { osc.getInstance().callMain(['/in.scad', ...backendArgs, '-o', '/out.stl']); }
-  catch { threw = true; }
-  let data = null;
-  try { data = fs.readFile('/out.stl'); } catch {}   // Uint8Array (ascii or binary STL)
-  if (threw || !data || data.length === 0) return null;
-  return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+  try {
+    const fs = osc.getInstance().FS;
+    fs.writeFile('/in.scad', code);
+    let threw = false;
+    try { osc.getInstance().callMain(['/in.scad', ...backendArgs, '-o', '/out.stl']); }
+    catch { threw = true; }
+    let data = null;
+    try { data = fs.readFile('/out.stl'); } catch {}   // Uint8Array (ascii or binary STL)
+    if (threw || !data || data.length === 0) return null;
+    return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+  } finally {
+    osc = null;   // drop the Emscripten heap (tens of MB) so it's GC-eligible before the next render/picker
+  }
 }
 
 async function compileScad(code){
@@ -308,6 +312,7 @@ function resize(){
   }
 }
 let rafId = null;
+let glLose = null;   // WEBGL_lose_context extension, used to free GPU memory while hidden
 function loop(){
   resize();
   controls.autoRotate = spinOn;
@@ -319,17 +324,31 @@ function startViewer(){
   if (!renderer){
     renderer = new THREE.WebGLRenderer({ canvas, antialias:!isMobile, powerPreference:'low-power' });
     renderer.setPixelRatio(Math.min(devicePixelRatio, isMobile ? 1.5 : 2));
-    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.enabled = !isMobile;   // shadow-map FBO is pure resident memory — skip it on mobile
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    glLose = renderer.getContext().getExtension('WEBGL_lose_context');
+    // Recover gracefully if the context is lost (ours intentionally, or iOS reclaiming GPU).
+    canvas.addEventListener('webglcontextlost', e => { e.preventDefault(); if (rafId != null){ cancelAnimationFrame(rafId); rafId = null; } });
+    canvas.addEventListener('webglcontextrestored', () => { if (rafId == null) loop(); });
+  }
+  if (renderer.getContext().isContextLost()){
+    if (glLose) glLose.restoreContext();   // 'webglcontextrestored' restarts the loop
+    return;
   }
   if (rafId == null) loop();
 }
-function stopViewer(){ if (rafId != null){ cancelAnimationFrame(rafId); rafId = null; } }
+// Releasing the GL context (not just pausing the loop) frees the framebuffers the tab
+// holds while the picker is open — that resident memory is exactly what iOS evicts on.
+function stopViewer(){
+  if (rafId != null){ cancelAnimationFrame(rafId); rafId = null; }
+  if (glLose && renderer && !renderer.getContext().isContextLost()) glLose.loseContext();
+}
 
-// Pause rendering whenever the page is hidden (e.g. while the file picker is open),
-// so the tab's memory/CPU pressure stays low and iOS won't reload it.
+// Pause + release the viewer whenever the page is hidden (e.g. the file picker is open);
+// bring it back only when visible again AND there's a model to show.
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden) stopViewer(); else if (renderer) startViewer();
+  if (document.hidden) stopViewer();
+  else if (mesh) startViewer();
 });
 
 /* ---------------- UI wiring ---------------- */
@@ -390,18 +409,36 @@ function loadFile(file){
   r.readAsText(file);
 }
 
+// iOS can still reload the tab on the lowest-RAM devices (an OS-driven process
+// kill we can't trap). Snapshot the source so a reload just restores your work
+// instead of losing it.
+const STATE_KEY = 'scad-state';
+function saveState(){
+  try { sessionStorage.setItem(STATE_KEY, JSON.stringify({ code: codeEl.value, name: $('fname').textContent })); } catch {}
+}
+function restoreState(){
+  try {
+    const s = JSON.parse(sessionStorage.getItem(STATE_KEY) || 'null');
+    if (s && s.code){ codeEl.value = s.code; $('fname').textContent = s.name || ''; }
+  } catch {}
+}
+addEventListener('pagehide', saveState);
+
 /* drag & drop + browse. The <label for="file"> opens the picker natively —
    no scripted .click(), which iOS Safari blocks for hidden inputs. */
 const drop = $('drop');
 const fileInput = $('file');
-// Pause the 3D viewer the instant the picker is invoked, resume when we're back —
-// extra insurance against iOS reloading the tab during file selection.
-fileInput.addEventListener('click', stopViewer);
-window.addEventListener('focus', () => { if (renderer) startViewer(); });
+// The instant the picker is invoked: snapshot the source (so a reload is harmless)
+// and release the GL context. Resume is driven solely by visibilitychange — a
+// window 'focus' resume fires while the picker is still dismissing and would
+// re-create heavy work at the most memory-sensitive moment.
+fileInput.addEventListener('click', () => { saveState(); stopViewer(); });
 fileInput.addEventListener('change', e => {
-  if (renderer) startViewer();
-  loadFile(e.target.files && e.target.files[0]);
+  const f = e.target.files && e.target.files[0];
   e.target.value = ''; // allow re-picking the same file
+  // Defer compile + context creation a couple of frames so they don't coincide
+  // with the picker-dismiss / foreground transition (which is when iOS evicts).
+  requestAnimationFrame(() => requestAnimationFrame(() => loadFile(f)));
 });
 ['dragenter','dragover'].forEach(ev => addEventListener(ev, e => {
   if ([...e.dataTransfer.types].includes('Files')){ e.preventDefault(); drop.classList.add('hot'); }
@@ -451,7 +488,8 @@ translate([0, 0, 6]) cylinder(h = 3, r1 = 9, r2 = 6);`;
 /* The engine (~14 MB) loads lazily on the first render — NOT on page open.
    Eagerly downloading + parsing it on load was heavy on mobile and unnecessary
    until the user actually picks a file. */
-setStatus('ready', 'Ready — choose a .scad file');
+restoreState();
+setStatus('ready', codeEl.value.trim() ? 'Restored — press Render ▸' : 'Ready — choose a .scad file');
 </script>
 </body>
 </html>
