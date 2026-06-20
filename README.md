@@ -30,6 +30,7 @@ python3 -m http.server 8000
 
 ## Limits
 
-- Uses OpenSCAD's default CGAL backend — heavy models with high `$fn` take a few seconds.
+- Renders with OpenSCAD's fast **Manifold** backend (`--backend=manifold`), falling back to
+  the slower CGAL kernel only for non-manifold models. Very high `$fn` can still take a moment.
 - This WASM build ships without bundled fonts/MCAD, so `text()` and `use <MCAD/...>`
   will error in the console; primitive/CSG geometry renders fine.

@@ -4,6 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>SCAD Viewer — upload & preview OpenSCAD in 3D</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ctext y='26' font-size='26'%3E%E2%AC%A1%3C/text%3E%3C/svg%3E" />
 <style>
   :root{
     --bg:#0c0f14; --panel:#11161f; --panel-2:#0e1219; --line:#1d2733;
@@ -30,9 +31,11 @@
   .scroll::-webkit-scrollbar-thumb{background:#1c2735;border-radius:9px}
 
   .drop{
-    border:1.5px dashed #2a3a4d; border-radius:12px; padding:20px 14px; text-align:center;
-    cursor:pointer; transition:.15s; background:#0d1219;
+    display:block; border:1.5px dashed #2a3a4d; border-radius:12px; padding:20px 14px; text-align:center;
+    cursor:pointer; transition:.15s; background:#0d1219; -webkit-tap-highlight-color:rgba(76,196,255,.2);
   }
+  /* keep the file input in the render tree (not display:none) so iOS reliably opens the picker via the label */
+  .vh{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);border:0;opacity:0}
   .drop:hover,.drop.hot{border-color:var(--accent); background:#0e1722; box-shadow:0 0 0 3px rgba(76,196,255,.08) inset}
   .drop strong{display:block; font-size:13px}
   .drop span{color:var(--muted); font-size:12px}
@@ -101,12 +104,12 @@
   </div>
 
   <div class="scroll">
-    <div id="drop" class="drop">
+    <label id="drop" class="drop" for="file">
       <div class="ico">⬡</div>
-      <strong>Drop a .scad file</strong>
-      <span>or click to browse</span>
-    </div>
-    <input id="file" type="file" accept=".scad,text/plain" hidden />
+      <strong>Tap to choose a .scad file</strong>
+      <span>or drag &amp; drop it here</span>
+    </label>
+    <input id="file" class="vh" type="file" />
 
     <div class="row">
       <button id="sample">Load sample</button>
@@ -145,19 +148,35 @@
   </div>
 </main>
 
-<script type="importmap">
-{
-  "imports": {
-    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
-    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+<!-- Classic script: surfaces any load/runtime failure on screen instead of freezing silently.
+     Runs before the module so it catches even module import-resolution errors. -->
+<script>
+(function () {
+  function show(msg) {
+    var st = document.getElementById('status');
+    var s = document.getElementById('statusText');
+    var log = document.getElementById('log');
+    if (s) s.textContent = 'Load error — see console';
+    if (st) st.className = 'status err';
+    if (log) { var d = document.createElement('div'); d.className = 'e'; d.textContent = '✗ ' + msg; log.appendChild(d); }
   }
-}
+  window.addEventListener('error', function (e) {
+    if (e && e.target && e.target !== window && (e.target.src || e.target.href)) {
+      show('Failed to load ' + (e.target.src || e.target.href));
+    } else if (e && e.message) { show(e.message); }
+  }, true);
+  window.addEventListener('unhandledrejection', function (e) {
+    var r = e && e.reason; show('Unhandled: ' + ((r && r.message) || r || 'promise rejection'));
+  });
+})();
 </script>
 
+<!-- three.js via esm.sh absolute URLs: no import map (works on iOS 11+, not just 16.4+),
+     and esm.sh dedupes addons to a single three instance. -->
 <script type="module">
-import * as THREE from 'three';
-import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { STLLoader } from 'three/addons/loaders/STLLoader.js';
+import * as THREE from 'https://esm.sh/three@0.160.0';
+import { OrbitControls } from 'https://esm.sh/three@0.160.0/examples/jsm/controls/OrbitControls.js';
+import { STLLoader } from 'https://esm.sh/three@0.160.0/examples/jsm/loaders/STLLoader.js';
 
 /* ---------------- OpenSCAD engine (lazy, fresh instance per compile) ---------------- */
 let createOpenSCAD = null;
@@ -168,23 +187,34 @@ async function loadEngine(){
   createOpenSCAD = mod.createOpenSCAD;
 }
 
-async function compileScad(code){
-  await loadEngine();
-  // A fresh instance per render keeps OpenSCAD's globals clean across files.
+// One render attempt on a fresh instance. callMain is one-shot per instance
+// (a 2nd call crashes it), and instantiation is only ~150ms, so we make a new one each time.
+async function renderWith(code, backendArgs){
   const osc = await createOpenSCAD({
     print:    t => logLine(t, 'i'),
-    printErr: t => logLine(t, /error|fail/i.test(t) ? 'e' : 'w'),
+    printErr: t => logLine(t, /\b(error|fail)/i.test(t) ? 'e' : 'w'),
   });
   const fs = osc.getInstance().FS;
-  try { fs.unlink('/in.scad'); } catch {}
-  try { fs.unlink('/out.stl'); } catch {}
   fs.writeFile('/in.scad', code);
-  osc.getInstance().callMain(['/in.scad', '-o', '/out.stl']);
-  let data;
-  try { data = fs.readFile('/out.stl'); }      // Uint8Array (ascii or binary STL)
-  catch { throw new Error('OpenSCAD produced no output — see console for errors.'); }
-  if (!data || data.length === 0) throw new Error('Empty model — check your .scad for errors.');
+  let threw = false;
+  try { osc.getInstance().callMain(['/in.scad', ...backendArgs, '-o', '/out.stl']); }
+  catch { threw = true; }
+  let data = null;
+  try { data = fs.readFile('/out.stl'); } catch {}   // Uint8Array (ascii or binary STL)
+  if (threw || !data || data.length === 0) return null;
   return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+}
+
+async function compileScad(code){
+  await loadEngine();
+  // Manifold backend is ~100x faster than CGAL (25s → <0.2s for the sample).
+  // Fall back to CGAL only if a model isn't manifold-clean.
+  let stl = await renderWith(code, ['--backend=manifold']);
+  if (stl) return stl;
+  logLine('Manifold backend produced no output — retrying with CGAL (slower)…', 'w');
+  stl = await renderWith(code, []);
+  if (stl) return stl;
+  throw new Error('OpenSCAD produced no output — check your .scad for errors (see console).');
 }
 
 /* ---------------- three.js scene ---------------- */
@@ -218,6 +248,7 @@ let ground = makeGround();
 scene.add(ground);
 
 let mesh = null;
+let spinOn = false; // read by loop() below, so it must be declared before loop() runs
 const material = new THREE.MeshStandardMaterial({ color:'#7fdcff', metalness:0.15, roughness:0.55, flatShading:false });
 
 function makeGrid(){
@@ -283,7 +314,6 @@ loop();
 /* ---------------- UI wiring ---------------- */
 const $ = id => document.getElementById(id);
 const codeEl = $('code'), logEl = $('log');
-let spinOn = false;
 
 function setStatus(kind, text){
   const s = $('status'); s.className = 'status ' + kind;
@@ -339,10 +369,13 @@ function loadFile(file){
   r.readAsText(file);
 }
 
-/* drag & drop + browse */
+/* drag & drop + browse. The <label for="file"> opens the picker natively —
+   no scripted .click(), which iOS Safari blocks for hidden inputs. */
 const drop = $('drop');
-drop.addEventListener('click', () => $('file').click());
-$('file').addEventListener('change', e => loadFile(e.target.files[0]));
+$('file').addEventListener('change', e => {
+  loadFile(e.target.files && e.target.files[0]);
+  e.target.value = ''; // allow re-picking the same file
+});
 ['dragenter','dragover'].forEach(ev => addEventListener(ev, e => {
   if ([...e.dataTransfer.types].includes('Files')){ e.preventDefault(); drop.classList.add('hot'); }
 }));
