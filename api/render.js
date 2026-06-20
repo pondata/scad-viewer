@@ -2,7 +2,7 @@
 // Also runs locally via dev-server.mjs (which polyfills res.status/json/send).
 import { compileScadToStl } from '../lib/compile.mjs';
 
-export const config = { maxDuration: 30 };
+export const config = { maxDuration: 60 };
 
 const MAX_BYTES = 2_000_000;
 

@@ -200,7 +200,7 @@ async function renderWith(code, backendArgs){
     const fs = osc.getInstance().FS;
     fs.writeFile('/in.scad', code);
     let threw = false;
-    try { osc.getInstance().callMain(['/in.scad', ...backendArgs, '-o', '/out.stl']); }
+    try { osc.getInstance().callMain(['/in.scad', ...backendArgs, '--export-format=binstl', '-o', '/out.stl']); }
     catch { threw = true; }
     let data = null;
     try { data = fs.readFile('/out.stl'); } catch {}   // Uint8Array (ascii or binary STL)
@@ -216,10 +216,15 @@ async function renderWith(code, backendArgs){
 // in-browser path; on Vercel / localhost use the same-origin /api/render function.
 const API_URL = location.hostname.endsWith('github.io') ? '' : '/api/render';
 async function compileViaBackend(code){
-  if (!API_URL) throw new Error('no backend configured');
-  const res = await fetch(API_URL, { method:'POST', headers:{ 'Content-Type':'text/plain' }, body: code });
+  if (!API_URL){ const e = new Error('no backend'); e.noBackend = true; throw e; }
+  let res;
+  try { res = await fetch(API_URL, { method:'POST', headers:{ 'Content-Type':'text/plain' }, body: code }); }
+  catch { const e = new Error('cannot reach compile server'); e.noBackend = true; throw e; }
+  if (res.status === 404){ const e = new Error('no compile server here'); e.noBackend = true; throw e; }
   if (!res.ok){
-    let msg = 'server error ' + res.status;
+    // The server responded with an error (compile failure / timeout). Surface it —
+    // do NOT fall back to the heavy in-browser engine, which would hang a weak phone.
+    let msg = 'server error ' + res.status + (res.status === 504 ? ' — compile timed out (model too heavy)' : '');
     try { const j = await res.json(); if (j.error) msg = j.error; if (j.log) logLine(j.log, 'e'); } catch {}
     throw new Error(msg);
   }
@@ -397,12 +402,16 @@ async function render(){
   let stl, via;
   try {
     if (API_URL){
+      overlay(true, 'Rendering on server…', '');
       try {
-        overlay(true, 'Rendering on server…', '');
         stl = await compileViaBackend(code);   // light path: phone just renders the mesh
         via = 'server';
       } catch (e){
-        logLine('Server compile unavailable (' + (e.message || e) + ') — using in-browser engine…', 'w');
+        if (e.noBackend){
+          logLine('No compile server — using in-browser engine…', 'w');   // fall through to in-browser
+        } else {
+          throw e;   // real compile error/timeout: show it, don't hang a phone with the 14 MB engine
+        }
       }
     }
     if (!stl){
