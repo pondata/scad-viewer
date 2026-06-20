@@ -222,10 +222,11 @@ async function compileScad(code){
 /* ---------------- three.js scene ---------------- */
 const canvas = document.getElementById('view');
 const isMobile = matchMedia('(max-width:760px), (pointer:coarse)').matches;
-const renderer = new THREE.WebGLRenderer({ canvas, antialias:!isMobile, powerPreference:'low-power' });
-renderer.setPixelRatio(Math.min(devicePixelRatio, isMobile ? 1.5 : 2));
-renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+// The WebGL context is created lazily — only once there's a model to show.
+// A live WebGL context on page load is the heaviest thing on the page, and iOS
+// jettisons (kills + reloads) the tab when a native file picker opens if memory
+// is high. No context at upload time → the tab survives the picker.
+let renderer = null;
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color('#0c0f14');
@@ -280,6 +281,7 @@ function setModel(geometry){
   mesh.castShadow = true; mesh.receiveShadow = true;
   scene.add(mesh);
   document.getElementById('empty').style.display = 'none';
+  startViewer();   // creates the WebGL context now that we have something to draw
   frameObject();
 }
 
@@ -305,14 +307,30 @@ function resize(){
     camera.aspect = w/h; camera.updateProjectionMatrix();
   }
 }
+let rafId = null;
 function loop(){
   resize();
   controls.autoRotate = spinOn;
   controls.update();
   renderer.render(scene, camera);
-  requestAnimationFrame(loop);
+  rafId = requestAnimationFrame(loop);
 }
-loop();
+function startViewer(){
+  if (!renderer){
+    renderer = new THREE.WebGLRenderer({ canvas, antialias:!isMobile, powerPreference:'low-power' });
+    renderer.setPixelRatio(Math.min(devicePixelRatio, isMobile ? 1.5 : 2));
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  }
+  if (rafId == null) loop();
+}
+function stopViewer(){ if (rafId != null){ cancelAnimationFrame(rafId); rafId = null; } }
+
+// Pause rendering whenever the page is hidden (e.g. while the file picker is open),
+// so the tab's memory/CPU pressure stays low and iOS won't reload it.
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) stopViewer(); else if (renderer) startViewer();
+});
 
 /* ---------------- UI wiring ---------------- */
 const $ = id => document.getElementById(id);
@@ -375,7 +393,13 @@ function loadFile(file){
 /* drag & drop + browse. The <label for="file"> opens the picker natively —
    no scripted .click(), which iOS Safari blocks for hidden inputs. */
 const drop = $('drop');
-$('file').addEventListener('change', e => {
+const fileInput = $('file');
+// Pause the 3D viewer the instant the picker is invoked, resume when we're back —
+// extra insurance against iOS reloading the tab during file selection.
+fileInput.addEventListener('click', stopViewer);
+window.addEventListener('focus', () => { if (renderer) startViewer(); });
+fileInput.addEventListener('change', e => {
+  if (renderer) startViewer();
   loadFile(e.target.files && e.target.files[0]);
   e.target.value = ''; // allow re-picking the same file
 });
