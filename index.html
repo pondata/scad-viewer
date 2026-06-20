@@ -211,6 +211,21 @@ async function renderWith(code, backendArgs){
   }
 }
 
+// Server compile path: POST the .scad, get an STL back. The phone never loads the
+// 14 MB engine or runs CAD compute. On github.io there's no backend, so force the
+// in-browser path; on Vercel / localhost use the same-origin /api/render function.
+const API_URL = location.hostname.endsWith('github.io') ? '' : '/api/render';
+async function compileViaBackend(code){
+  if (!API_URL) throw new Error('no backend configured');
+  const res = await fetch(API_URL, { method:'POST', headers:{ 'Content-Type':'text/plain' }, body: code });
+  if (!res.ok){
+    let msg = 'server error ' + res.status;
+    try { const j = await res.json(); if (j.error) msg = j.error; if (j.log) logLine(j.log, 'e'); } catch {}
+    throw new Error(msg);
+  }
+  return await res.arrayBuffer();
+}
+
 async function compileScad(code){
   await loadEngine();
   // Manifold backend is ~100x faster than CGAL (25s → <0.2s for the sample).
@@ -377,17 +392,30 @@ async function render(){
   if (!code){ logLine('Nothing to render — upload or load a sample first.', 'w'); return; }
   $('render').disabled = true;
   clearLog();
-  overlay(true, 'Compiling…', createOpenSCAD ? '' : 'first run loads the engine (~14 MB)');
-  setStatus('busy', 'Compiling .scad…');
+  setStatus('busy', 'Rendering…');
   const t0 = performance.now();
+  let stl, via;
   try {
-    const stl = await compileScad(code);
+    if (API_URL){
+      try {
+        overlay(true, 'Rendering on server…', '');
+        stl = await compileViaBackend(code);   // light path: phone just renders the mesh
+        via = 'server';
+      } catch (e){
+        logLine('Server compile unavailable (' + (e.message || e) + ') — using in-browser engine…', 'w');
+      }
+    }
+    if (!stl){
+      overlay(true, 'Compiling…', createOpenSCAD ? '' : 'first run loads the engine (~14 MB)');
+      stl = await compileScad(code);
+      via = 'browser';
+    }
     const geo = new STLLoader().parse(stl);
     setModel(geo);
     const ms = Math.round(performance.now() - t0);
     const tris = geo.attributes.position.count / 3 | 0;
-    setStatus('ready', `Rendered · ${tris.toLocaleString()} tris · ${ms} ms`);
-    logLine(`✓ done — ${tris.toLocaleString()} triangles in ${ms} ms`, 'i');
+    setStatus('ready', `Rendered · ${tris.toLocaleString()} tris · ${ms} ms${via === 'server' ? ' · server' : ''}`);
+    logLine(`✓ done — ${tris.toLocaleString()} triangles in ${ms} ms (${via})`, 'i');
   } catch (err){
     console.error(err);
     setStatus('err', 'Render failed');

@@ -1,0 +1,13 @@
+{
+  "name": "scad-viewer",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Upload a .scad file and preview it in 3D. Server compiles via OpenSCAD-WASM; the browser only renders the mesh.",
+  "scripts": {
+    "dev": "node dev-server.mjs"
+  },
+  "dependencies": {
+    "openscad-wasm": "0.0.4"
+  }
+}
